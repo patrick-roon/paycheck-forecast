@@ -4,7 +4,14 @@ import { Paycheck } from '@/types';
 export async function fetchPaychecks(): Promise<Paycheck[]> {
   try {
     const response = await fetch('/api/paychecks');
-    const { data: icalData } = await response.json();
+    const json = await response.json();
+
+    if (!response.ok || json.error) {
+      console.error('Error from API:', json.error);
+      throw new Error(json.error || 'Failed to fetch paychecks');
+    }
+
+    const icalData = json.data;
 
     const jcalData = ICAL.parse(icalData);
     const comp = new ICAL.Component(jcalData);

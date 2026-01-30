@@ -2,16 +2,14 @@
 
 import { useState, useEffect } from 'react';
 import { format, addMonths } from 'date-fns';
-import { fetchPaychecks, filterPaychecksByDateRange } from '@/lib/paycheckService';
+import { generatePaychecks, getDefaultConfig, PayScheduleConfig, PayFrequency } from '@/lib/paycheckGenerator';
 import { getDefaultBillsForSet } from '@/lib/billsConfig';
 import { Paycheck, Bill, Expense, RecurringExpense, PaycheckSummary } from '@/types';
 
 export default function Home() {
-  const [paychecks, setPaychecks] = useState<Paycheck[]>([]);
-  const [loading, setLoading] = useState(true);
+  const [payScheduleConfig, setPayScheduleConfig] = useState<PayScheduleConfig>(getDefaultConfig());
   const [startDate, setStartDate] = useState(new Date());
   const [endDate, setEndDate] = useState(addMonths(new Date(), 3));
-  const [defaultPaycheckAmount, setDefaultPaycheckAmount] = useState(5235);
 
   // Store bill amounts per paycheck (key: ISO date + bill name)
   const [billAmounts, setBillAmounts] = useState<Record<string, number>>({});
@@ -26,23 +24,8 @@ export default function Home() {
   const [billSet1, setBillSet1] = useState<Bill[]>(getDefaultBillsForSet(1));
   const [billSet2, setBillSet2] = useState<Bill[]>(getDefaultBillsForSet(2));
 
-  useEffect(() => {
-    loadPaychecks();
-  }, []);
-
-  const loadPaychecks = async () => {
-    setLoading(true);
-    const fetchedPaychecks = await fetchPaychecks();
-    // Set default paycheck amounts
-    const paychecksWithDefaults = fetchedPaychecks.map(pc => ({
-      ...pc,
-      amount: defaultPaycheckAmount
-    }));
-    setPaychecks(paychecksWithDefaults);
-    setLoading(false);
-  };
-
-  const filteredPaychecks = filterPaychecksByDateRange(paychecks, startDate, endDate);
+  // Generate paychecks based on configuration
+  const paychecks = generatePaychecks(startDate, endDate, payScheduleConfig);
 
   const getBillAmountKey = (paycheckDate: Date, billName: string) => {
     return `${paycheckDate.toISOString()}_${billName}`;
@@ -121,7 +104,7 @@ export default function Home() {
   const calculateSummaries = (): PaycheckSummary[] => {
     let cumulativeRemaining = 0;
 
-    return filteredPaychecks.map(paycheck => {
+    return paychecks.map(paycheck => {
       const defaultBills = paycheck.billSet === 1 ? billSet1 : billSet2;
       const bills = defaultBills.map(bill => ({
         ...bill,
@@ -186,14 +169,6 @@ export default function Home() {
     window.print();
   };
 
-  if (loading) {
-    return (
-      <div className="min-h-screen bg-gray-50 flex items-center justify-center">
-        <div className="text-xl">Loading paychecks...</div>
-      </div>
-    );
-  }
-
   return (
     <div className="min-h-screen bg-gray-50 py-8 px-4">
       <div className="max-w-6xl mx-auto">
@@ -217,10 +192,75 @@ export default function Home() {
 
         {/* Controls */}
         <div className="bg-white rounded-lg shadow p-6 mb-6">
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-2">
-                Start Date
+                Pay Frequency
+              </label>
+              <select
+                value={payScheduleConfig.frequency}
+                onChange={(e) => setPayScheduleConfig({
+                  ...payScheduleConfig,
+                  frequency: e.target.value as PayFrequency
+                })}
+                className="w-full px-3 py-2 border border-gray-300 rounded-md text-gray-900"
+              >
+                <option value="weekly">Weekly</option>
+                <option value="bi-weekly">Bi-Weekly</option>
+                <option value="semi-monthly">Semi-Monthly</option>
+                <option value="monthly">Monthly</option>
+              </select>
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-2">
+                First Paycheck Date
+              </label>
+              <input
+                type="date"
+                value={format(payScheduleConfig.startDate, 'yyyy-MM-dd')}
+                onChange={(e) => setPayScheduleConfig({
+                  ...payScheduleConfig,
+                  startDate: new Date(e.target.value)
+                })}
+                className="w-full px-3 py-2 border border-gray-300 rounded-md text-gray-900"
+              />
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-2">
+                Paycheck Amount
+              </label>
+              <input
+                type="number"
+                value={payScheduleConfig.defaultAmount}
+                onChange={(e) => setPayScheduleConfig({
+                  ...payScheduleConfig,
+                  defaultAmount: parseFloat(e.target.value) || 0
+                })}
+                className="w-full px-3 py-2 border border-gray-300 rounded-md text-gray-900"
+              />
+            </div>
+            {payScheduleConfig.frequency === 'semi-monthly' && (
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-2">
+                  Adjust to Friday
+                </label>
+                <input
+                  type="checkbox"
+                  checked={payScheduleConfig.adjustToNearestWeekday}
+                  onChange={(e) => setPayScheduleConfig({
+                    ...payScheduleConfig,
+                    adjustToNearestWeekday: e.target.checked
+                  })}
+                  className="h-10 w-5"
+                />
+              </div>
+            )}
+          </div>
+
+          <div className="mt-4 grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-2">
+                Forecast Start Date
               </label>
               <input
                 type="date"
@@ -231,27 +271,12 @@ export default function Home() {
             </div>
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-2">
-                End Date
+                Forecast End Date
               </label>
               <input
                 type="date"
                 value={format(endDate, 'yyyy-MM-dd')}
                 onChange={(e) => setEndDate(new Date(e.target.value))}
-                className="w-full px-3 py-2 border border-gray-300 rounded-md text-gray-900"
-              />
-            </div>
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-2">
-                Default Paycheck Amount
-              </label>
-              <input
-                type="number"
-                value={defaultPaycheckAmount}
-                onChange={(e) => {
-                  const amount = parseFloat(e.target.value) || 0;
-                  setDefaultPaycheckAmount(amount);
-                  setPaychecks(prev => prev.map(pc => ({ ...pc, amount })));
-                }}
                 className="w-full px-3 py-2 border border-gray-300 rounded-md text-gray-900"
               />
             </div>
@@ -412,9 +437,9 @@ export default function Home() {
           ))}
         </div>
 
-        {filteredPaychecks.length === 0 && (
+        {paychecks.length === 0 && (
           <div className="bg-white rounded-lg shadow p-8 text-center text-gray-500">
-            No paychecks found in the selected date range. Try adjusting the dates.
+            No paychecks in the selected date range.
           </div>
         )}
       </div>
