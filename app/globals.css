@@ -24,3 +24,33 @@ body {
   color: var(--foreground);
   font-family: Arial, Helvetica, sans-serif;
 }
+
+@media print {
+  /* Hide buttons and controls when printing */
+  button,
+  input[type="date"],
+  input[type="number"] {
+    display: none !important;
+  }
+
+  /* Ensure good page breaks */
+  .paycheck-card {
+    page-break-inside: avoid;
+    break-inside: avoid;
+  }
+
+  /* Remove background colors for better printing */
+  body {
+    background: white !important;
+  }
+
+  /* Make text black for printing */
+  * {
+    color: black !important;
+  }
+
+  /* Keep some colors for headings */
+  h1, h2, h3 {
+    color: #1f2937 !important;
+  }
+}
