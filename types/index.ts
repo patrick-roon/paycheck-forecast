@@ -14,7 +14,9 @@ export interface Expense {
   id: string;
   name: string;
   amount: number;
-  paycheckDate: string; // ISO date string
+  paycheckDate?: string; // ISO date string - for expenses linked to paychecks
+  reimbursementDate?: string; // ISO date string - for expenses linked to reimbursements
+  isReimbursable?: boolean; // marks expense as reimbursable
 }
 
 export interface RecurringExpense {
@@ -32,3 +34,23 @@ export interface PaycheckSummary {
   remaining: number;
   cumulativeRemaining: number;
 }
+
+// Reimbursement types (computed dynamically, not persisted)
+export interface Reimbursement {
+  id: string; // Generated ID (e.g., `reimb-${date}`)
+  amount: number; // Sum of linked expenses
+  date: Date; // Calculated from expense date + interval
+  expenseIds: string[]; // References to expenses
+}
+
+export interface ReimbursementEntry {
+  reimbursement: Reimbursement;
+  linkedExpenses: Expense[]; // Expenses being reimbursed
+  oneTimeExpenses: Expense[]; // One-time expenses subtracting from reimbursement
+  cumulativeRemaining: number;
+}
+
+// Union type for chronological display of paychecks and reimbursements
+export type PaycheckOrReimbursement =
+  | { type: 'paycheck'; data: PaycheckSummary }
+  | { type: 'reimbursement'; data: ReimbursementEntry };

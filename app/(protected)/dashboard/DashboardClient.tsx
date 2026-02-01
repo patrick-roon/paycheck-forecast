@@ -7,8 +7,10 @@ import {
   PayScheduleConfig,
   PayFrequency,
 } from '@/lib/paycheckGenerator'
-import { Bill, Expense, RecurringExpense, PaycheckSummary } from '@/types'
+import { generateReimbursements } from '@/lib/reimbursementGenerator'
+import { Bill, Expense, RecurringExpense, PaycheckSummary, PaycheckOrReimbursement, ReimbursementEntry } from '@/types'
 import PaycheckCard from '@/components/PaycheckCard'
+import ReimbursementCard from '@/components/ReimbursementCard'
 import RecurringExpenseForm from '@/components/RecurringExpenseForm'
 import BillForm from '@/components/BillForm'
 import {
@@ -57,6 +59,10 @@ export default function DashboardClient({
     useState<PayScheduleConfig>(defaultConfig)
   const [startDate, setStartDate] = useState(defaultConfig.startDate)
   const [endDate, setEndDate] = useState(addMonths(new Date(), 3))
+  const [reimbursementInterval, setReimbursementInterval] = useState(
+    initialConfig?.reimbursement_interval || 14
+  )
+  const [reimbursementDateOverrides, setReimbursementDateOverrides] = useState<Record<string, Date>>({})
 
   // Convert database bills to app format
   const billSet1: Bill[] = initialBills
@@ -67,13 +73,16 @@ export default function DashboardClient({
     .filter((b) => b.bill_set === 2)
     .map((b) => ({ name: b.name, amount: b.amount, billSet: 2 }))
 
-  // Convert database expenses to app format
-  const expenses: Expense[] = initialExpenses.map((e) => ({
-    id: e.id,
-    name: e.name,
-    amount: e.amount,
-    paycheckDate: e.paycheck_date,
-  }))
+  // Convert database expenses to app format and manage in state
+  const [expenses, setExpenses] = useState<Expense[]>(
+    initialExpenses.map((e) => ({
+      id: e.id,
+      name: e.name,
+      amount: e.amount,
+      paycheckDate: e.paycheck_date,
+      isReimbursable: e.is_reimbursable || false,
+    }))
+  )
 
   // Convert database recurring expenses to app format
   const recurringExpenses: RecurringExpense[] = initialRecurringExpenses.map(
@@ -130,10 +139,31 @@ export default function DashboardClient({
     })
   }
 
+  const handleAddReimbursementExpense = (
+    reimbursementDate: Date,
+    name: string,
+    amount: number
+  ) => {
+    const newExpense: Expense = {
+      id: `reimb-exp-${Date.now()}-${Math.random()}`,
+      name,
+      amount,
+      reimbursementDate: reimbursementDate.toISOString().split('T')[0],
+    }
+    setExpenses(prev => [...prev, newExpense])
+  }
+
   const handleRemoveExpense = (expenseId: string) => {
-    startTransition(async () => {
-      await removeExpenseAction(expenseId)
-    })
+    const expense = expenses.find(e => e.id === expenseId)
+    if (expense?.reimbursementDate) {
+      // For reimbursement expenses, just remove from local state
+      setExpenses(prev => prev.filter(e => e.id !== expenseId))
+    } else {
+      // For paycheck expenses, use the database action
+      startTransition(async () => {
+        await removeExpenseAction(expenseId)
+      })
+    }
   }
 
   const handleUpdateExpense = (
@@ -141,9 +171,33 @@ export default function DashboardClient({
     name: string,
     amount: number
   ) => {
-    startTransition(async () => {
-      await updateExpenseAction(expenseId, name, amount)
-    })
+    const expense = expenses.find(e => e.id === expenseId)
+    if (expense?.reimbursementDate) {
+      // For reimbursement expenses, just update local state
+      setExpenses(prev => prev.map(e =>
+        e.id === expenseId ? { ...e, name, amount } : e
+      ))
+    } else {
+      // For paycheck expenses, use the database action
+      startTransition(async () => {
+        await updateExpenseAction(expenseId, name, amount)
+      })
+    }
+  }
+
+  const handleToggleReimbursable = (expenseId: string, isReimbursable: boolean) => {
+    setExpenses(prevExpenses =>
+      prevExpenses.map(e =>
+        e.id === expenseId ? { ...e, isReimbursable } : e
+      )
+    )
+  }
+
+  const handleUpdateReimbursementDate = (reimbursementId: string, newDate: Date) => {
+    setReimbursementDateOverrides(prev => ({
+      ...prev,
+      [reimbursementId]: newDate
+    }))
   }
 
   const handleAddRecurringExpense = (name: string, amount: number) => {
@@ -205,10 +259,17 @@ export default function DashboardClient({
     return expenses.filter((e) => e.paycheckDate === dateStr)
   }
 
-  const calculateSummaries = (): PaycheckSummary[] => {
-    let cumulativeRemaining = 0
+  const getReimbursementExpenses = (reimbursementDate: Date): Expense[] => {
+    const dateStr = reimbursementDate.toISOString().split('T')[0]
+    return expenses.filter((e) => e.reimbursementDate === dateStr)
+  }
 
-    return paychecks.map((paycheck) => {
+  const calculateChronologicalEntries = (): PaycheckOrReimbursement[] => {
+    let cumulativeRemaining = 0
+    const entries: PaycheckOrReimbursement[] = []
+
+    // Calculate paycheck summaries
+    const paycheckSummaries = paychecks.map((paycheck) => {
       const defaultBills = paycheck.billSet === 1 ? billSet1 : billSet2
       const bills = defaultBills.map((bill) => ({
         ...bill,
@@ -228,8 +289,6 @@ export default function DashboardClient({
       const totalExpenses = totalOneTimeExpenses + totalRecurringExpenses
       const remaining = paycheck.amount - totalBills - totalExpenses
 
-      cumulativeRemaining += remaining
-
       return {
         paycheck,
         bills,
@@ -237,20 +296,85 @@ export default function DashboardClient({
         totalBills,
         totalExpenses,
         remaining,
-        cumulativeRemaining,
+        cumulativeRemaining: 0, // Will recalculate after sorting
       }
     })
+
+    // Generate reimbursements from reimbursable expenses
+    const reimbursements = generateReimbursements(expenses, {
+      defaultInterval: reimbursementInterval,
+      dateOverrides: reimbursementDateOverrides,
+    })
+
+    // Create reimbursement entries
+    const reimbursementEntries = reimbursements.map((reimbursement) => {
+      const linkedExpenses = expenses.filter((e) =>
+        reimbursement.expenseIds.includes(e.id)
+      )
+      const oneTimeExpenses = getReimbursementExpenses(reimbursement.date)
+
+      return {
+        reimbursement,
+        linkedExpenses,
+        oneTimeExpenses,
+        cumulativeRemaining: 0, // Will recalculate after sorting
+      }
+    })
+
+    // Merge paychecks and reimbursements
+    paycheckSummaries.forEach(summary => {
+      entries.push({ type: 'paycheck' as const, data: summary })
+    })
+
+    reimbursementEntries.forEach(entry => {
+      entries.push({ type: 'reimbursement' as const, data: entry })
+    })
+
+    // Sort by date chronologically
+    entries.sort((a, b) => {
+      const dateA = a.type === 'paycheck' ? a.data.paycheck.date : a.data.reimbursement.date
+      const dateB = b.type === 'paycheck' ? b.data.paycheck.date : b.data.reimbursement.date
+      return dateA.getTime() - dateB.getTime()
+    })
+
+    // Recalculate cumulative savings in chronological order
+    cumulativeRemaining = 0
+    entries.forEach(entry => {
+      if (entry.type === 'paycheck') {
+        cumulativeRemaining += entry.data.remaining
+        entry.data.cumulativeRemaining = cumulativeRemaining
+      } else {
+        const totalExpenses = entry.data.oneTimeExpenses.reduce((sum, e) => sum + e.amount, 0)
+        const netReimbursement = entry.data.reimbursement.amount - totalExpenses
+        cumulativeRemaining += netReimbursement
+        entry.data.cumulativeRemaining = cumulativeRemaining
+      }
+    })
+
+    return entries
   }
 
-  const summaries = calculateSummaries()
+  const chronologicalEntries = calculateChronologicalEntries()
   const totalSavings =
-    summaries.length > 0 ? summaries[summaries.length - 1].cumulativeRemaining : 0
-  const totalIncome = summaries.reduce((sum, s) => sum + s.paycheck.amount, 0)
-  const totalBills = summaries.reduce((sum, s) => sum + s.totalBills, 0)
-  const totalExpenses = summaries.reduce((sum, s) => sum + s.totalExpenses, 0)
+    chronologicalEntries.length > 0
+      ? chronologicalEntries[chronologicalEntries.length - 1].data.cumulativeRemaining
+      : 0
+  const totalIncome = chronologicalEntries
+    .filter(e => e.type === 'paycheck')
+    .reduce((sum, e) => sum + e.data.paycheck.amount, 0)
+  const totalReimbursements = chronologicalEntries
+    .filter(e => e.type === 'reimbursement')
+    .reduce((sum, e) => sum + e.data.reimbursement.amount, 0)
+  const totalBills = chronologicalEntries
+    .filter(e => e.type === 'paycheck')
+    .reduce((sum, e) => sum + e.data.totalBills, 0)
+  const totalExpenses = chronologicalEntries
+    .filter(e => e.type === 'paycheck')
+    .reduce((sum, e) => sum + e.data.totalExpenses, 0)
 
   const exportToCSV = () => {
     const headers = [
+      'Type',
       'Date',
       'Income',
       'Bills',
@@ -258,14 +382,31 @@ export default function DashboardClient({
       'Remaining',
       'Cumulative Savings',
     ]
-    const rows = summaries.map((s) => [
-      format(s.paycheck.date, 'yyyy-MM-dd'),
-      s.paycheck.amount.toFixed(2),
-      s.totalBills.toFixed(2),
-      s.totalExpenses.toFixed(2),
-      s.remaining.toFixed(2),
-      s.cumulativeRemaining.toFixed(2),
-    ])
+    const rows = chronologicalEntries.map((entry) => {
+      if (entry.type === 'paycheck') {
+        const s = entry.data
+        return [
+          'Paycheck',
+          format(s.paycheck.date, 'yyyy-MM-dd'),
+          s.paycheck.amount.toFixed(2),
+          s.totalBills.toFixed(2),
+          s.totalExpenses.toFixed(2),
+          s.remaining.toFixed(2),
+          s.cumulativeRemaining.toFixed(2),
+        ]
+      } else {
+        const r = entry.data
+        return [
+          'Reimbursement',
+          format(r.reimbursement.date, 'yyyy-MM-dd'),
+          r.reimbursement.amount.toFixed(2),
+          '0.00',
+          '0.00',
+          r.reimbursement.amount.toFixed(2),
+          r.cumulativeRemaining.toFixed(2),
+        ]
+      }
+    })
 
     const csvContent = [
       headers.join(','),
@@ -294,16 +435,10 @@ export default function DashboardClient({
           </h1>
           <div className="flex gap-3">
             <button
-              onClick={exportToCSV}
-              className="px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 flex items-center gap-2"
-            >
-              <span>📊</span> Export CSV
-            </button>
-            <button
               onClick={exportToPDF}
               className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 flex items-center gap-2"
             >
-              <span>📄</span> Export PDF
+              <span>📄 </span> Export PDF
             </button>
           </div>
         </div>
@@ -344,6 +479,22 @@ export default function DashboardClient({
                 }
                 className="w-full px-3 py-2 border border-gray-300 rounded-md text-gray-900"
               />
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-2">
+                Reimbursement Interval (Days)
+              </label>
+              <input
+                type="number"
+                min="1"
+                max="60"
+                value={reimbursementInterval}
+                onChange={(e) => setReimbursementInterval(parseInt(e.target.value) || 14)}
+                className="w-full px-3 py-2 border border-gray-300 rounded-md text-gray-900"
+              />
+              <p className="text-xs text-gray-500 mt-1">
+                Days after expense until reimbursement (1-60)
+              </p>
             </div>
             {payScheduleConfig.frequency === 'semi-monthly' && (
               <div>
@@ -395,7 +546,7 @@ export default function DashboardClient({
               {format(startDate, 'MMM d, yyyy')} -{' '}
               {format(endDate, 'MMM d, yyyy')}
             </div>
-            <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+            <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
               <div>
                 <div className="text-sm font-medium text-gray-700 mb-1">
                   Total Income
@@ -403,6 +554,17 @@ export default function DashboardClient({
                 <div className="text-2xl font-bold text-blue-600">
                   $
                   {totalIncome.toLocaleString('en-US', {
+                    minimumFractionDigits: 2,
+                  })}
+                </div>
+              </div>
+              <div>
+                <div className="text-sm font-medium text-gray-700 mb-1">
+                  Total Reimbursements
+                </div>
+                <div className="text-2xl font-bold text-green-600">
+                  $
+                  {totalReimbursements.toLocaleString('en-US', {
                     minimumFractionDigits: 2,
                   })}
                 </div>
@@ -608,25 +770,41 @@ export default function DashboardClient({
           </div>
         </div>
 
-        {/* Paycheck List */}
+        {/* Paycheck & Reimbursement List */}
         <div className="space-y-6">
-          {summaries.map((summary, index) => (
-            <PaycheckCard
-              key={`${summary.paycheck.date.toISOString()}_${index}`}
-              summary={summary}
-              index={index}
-              recurringExpenses={recurringExpenses}
-              onUpdateBill={handleUpdateBillAmount}
-              onAddExpense={handleAddExpense}
-              onRemoveExpense={handleRemoveExpense}
-              onUpdateExpense={handleUpdateExpense}
-            />
-          ))}
+          {chronologicalEntries.map((entry, index) => {
+            if (entry.type === 'paycheck') {
+              return (
+                <PaycheckCard
+                  key={`paycheck-${entry.data.paycheck.date.toISOString()}-${index}`}
+                  summary={entry.data}
+                  index={chronologicalEntries.filter((e, i) => i <= index && e.type === 'paycheck').length - 1}
+                  recurringExpenses={recurringExpenses}
+                  onUpdateBill={handleUpdateBillAmount}
+                  onAddExpense={handleAddExpense}
+                  onRemoveExpense={handleRemoveExpense}
+                  onUpdateExpense={handleUpdateExpense}
+                  onToggleReimbursable={handleToggleReimbursable}
+                />
+              )
+            } else {
+              return (
+                <ReimbursementCard
+                  key={`reimbursement-${entry.data.reimbursement.id}-${index}`}
+                  entry={entry.data}
+                  onUpdateDate={handleUpdateReimbursementDate}
+                  onAddExpense={handleAddReimbursementExpense}
+                  onRemoveExpense={handleRemoveExpense}
+                  onUpdateExpense={handleUpdateExpense}
+                />
+              )
+            }
+          })}
         </div>
 
-        {paychecks.length === 0 && (
+        {chronologicalEntries.length === 0 && (
           <div className="bg-white rounded-lg shadow p-8 text-center text-gray-500">
-            No paychecks in the selected date range.
+            No paychecks or reimbursements in the selected date range.
           </div>
         )}
       </div>

@@ -12,6 +12,7 @@ interface PaycheckCardProps {
   onAddExpense: (paycheckDate: Date, name: string, amount: number) => void
   onRemoveExpense: (expenseId: string) => void
   onUpdateExpense: (expenseId: string, name: string, amount: number) => void
+  onToggleReimbursable: (expenseId: string, isReimbursable: boolean) => void
 }
 
 export default function PaycheckCard({
@@ -21,7 +22,8 @@ export default function PaycheckCard({
   onUpdateBill,
   onAddExpense,
   onRemoveExpense,
-  onUpdateExpense
+  onUpdateExpense,
+  onToggleReimbursable
 }: PaycheckCardProps) {
   const [showAddExpense, setShowAddExpense] = useState(false)
   const [newExpenseName, setNewExpenseName] = useState('')
@@ -155,7 +157,21 @@ export default function PaycheckCard({
         <div className="space-y-2">
           {summary.expenses.map(expense => (
             <div key={expense.id} className="flex justify-between items-center gap-2">
-              <span className="text-gray-700 flex-1">{expense.name}</span>
+              <div className="flex items-center gap-2 flex-1">
+                <input
+                  type="checkbox"
+                  checked={expense.isReimbursable || false}
+                  onChange={(e) => onToggleReimbursable(expense.id, e.target.checked)}
+                  className="h-4 w-4 text-blue-600 rounded cursor-pointer"
+                  title="Mark as reimbursable"
+                />
+                <span className="text-gray-700">{expense.name}</span>
+                {expense.isReimbursable && (
+                  <span className="text-xs bg-blue-100 text-blue-800 px-2 py-0.5 rounded">
+                    Reimbursable
+                  </span>
+                )}
+              </div>
               <input
                 type="number"
                 value={expense.amount}
