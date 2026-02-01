@@ -164,6 +164,6 @@ export function getDefaultConfig(): PayScheduleConfig {
     dayOfWeek: 5, // Friday
     semiMonthlyDays: [15, 0], // 15th and last day
     adjustToNearestWeekday: true,
-    defaultAmount: 5235,
+    defaultAmount: 2000,
   };
 }
